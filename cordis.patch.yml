@@ -1,0 +1,5 @@
+# Register the Trae provider without changing the profile's current
+# default model. The plugin reuses local Trae accounts or imported tokens.
+- insert:
+    - id: llm-trae
+      name: dsh-trae-connect

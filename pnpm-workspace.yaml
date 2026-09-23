@@ -1,0 +1,6 @@
+# pnpm 11 config. pnpm 11 refuses to run scripts (and to let `pnpm run <script>`
+# proceed past its dependency check) unless the packages that need build steps
+# are explicitly listed.
+allowBuilds:
+  '@google/genai': true
+  protobufjs: true
