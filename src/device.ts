@@ -253,54 +253,76 @@ export function signDeviceProof(
  */
 export function getTraeLocalDeviceId(): string {
   const home = process.env['HOME'] || ''
-  try {
-    const localEnvPath = join(home, 'Library/Application Support/Trae/ModularData/ckg_server/local_env.json')
-    if (existsSync(localEnvPath)) {
-      const raw = JSON.parse(readFileSync(localEnvPath, 'utf8')) as { device_id?: string }
-      if (typeof raw.device_id === 'string' && raw.device_id.trim() !== '') {
-        return raw.device_id.trim()
+  const candidates = [
+    join(home, 'Library/Application Support/TRAE SOLO CN/ModularData/ckg_server/local_env.json'),
+    join(home, 'Library/Application Support/Trae/ModularData/ckg_server/local_env.json'),
+    join(home, 'Library/Application Support/TRAE CN/ModularData/ckg_server/local_env.json'),
+    join(process.env['APPDATA'] || '', 'TRAE SOLO CN/ModularData/ckg_server/local_env.json'),
+    join(process.env['APPDATA'] || '', 'Trae/ModularData/ckg_server/local_env.json'),
+    join(home, '.config/TRAE SOLO CN/ModularData/ckg_server/local_env.json'),
+    join(home, '.config/Trae/ModularData/ckg_server/local_env.json'),
+  ]
+  for (const localEnvPath of candidates) {
+    try {
+      if (existsSync(localEnvPath)) {
+        const raw = JSON.parse(readFileSync(localEnvPath, 'utf8')) as { device_id?: string }
+        if (typeof raw.device_id === 'string' && raw.device_id.trim() !== '') {
+          return raw.device_id.trim()
+        }
       }
-    }
-  } catch {}
-  return '7685966972118484500'
+    } catch {}
+  }
+  return createDefaultIdentifiers().deviceId || '3493610113527706'
 }
 
 /**
  * 读取本地安装的 Trae 桌面端真实版本号。
  */
 export function getTraeClientAppVersion(): string {
-  try {
-    const productPath = '/Applications/Trae.app/Contents/Resources/app/product.json'
-    if (existsSync(productPath)) {
-      const raw = JSON.parse(readFileSync(productPath, 'utf8')) as { appVersion?: string }
-      if (typeof raw.appVersion === 'string' && raw.appVersion.trim() !== '') {
-        return raw.appVersion.trim()
+  const home = process.env['HOME'] || ''
+  const candidates = [
+    '/Applications/TRAE SOLO CN.app/Contents/Resources/app/product.json',
+    '/Applications/Trae.app/Contents/Resources/app/product.json',
+    '/Applications/Trae CN.app/Contents/Resources/app/product.json',
+    join(home, 'Applications/TRAE SOLO CN.app/Contents/Resources/app/product.json'),
+    join(home, 'Applications/Trae.app/Contents/Resources/app/product.json'),
+    join(process.env['LOCALAPPDATA'] || '', 'Programs/TRAE SOLO CN/resources/app/product.json'),
+    join(process.env['LOCALAPPDATA'] || '', 'Programs/Trae/resources/app/product.json'),
+    '/opt/trae-solo-cn/resources/app/product.json',
+    '/opt/trae/resources/app/product.json',
+  ]
+  for (const productPath of candidates) {
+    try {
+      if (existsSync(productPath)) {
+        const raw = JSON.parse(readFileSync(productPath, 'utf8')) as { appVersion?: string }
+        if (typeof raw.appVersion === 'string' && raw.appVersion.trim() !== '') {
+          return raw.appVersion.trim()
+        }
       }
-    }
-  } catch {}
-  return '3.5.104'
+    } catch {}
+  }
+  return '0.1.69'
 }
 
 /**
- * 构造完全符合官方 Trae 桌面端底层的原生请求头（无 Web Origin/Referer，严格对齐官方 clientParams）。
+ * 构造完全符合官方 Trae 桌面端底层的原生请求头（严格对齐官方 clientParams）。
  */
 export function buildTraeClientHeaders(accessToken: string): Record<string, string> {
   const deviceId = getTraeLocalDeviceId()
   const appVersion = getTraeClientAppVersion()
   const platform = process.platform
-  const osType = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'windows' : 'linux'
-  let osVersion = 'macOS 15.3.1'
+  const osType = platform === 'darwin' ? 'darwin' : platform === 'win32' ? 'windows' : 'linux'
+  let osVersion = '15.3.1'
   if (platform === 'darwin') {
     try {
-      const sw = execSync('sw_vers -productVersion', { encoding: 'utf8', timeout: 1000 }).trim()
-      osVersion = `macOS ${sw}`
+      osVersion = execSync('sw_vers -productVersion', { encoding: 'utf8', timeout: 1000 }).trim()
     } catch {
-      osVersion = `macOS ${release()}`
+      osVersion = release()
     }
   } else if (platform === 'win32') {
-    osVersion = `Windows ${release()}`
+    osVersion = release()
   } else {
-    osVersion = `Linux ${release()}`
+    osVersion = release()
   }
 
   return {
@@ -311,6 +333,6 @@ export function buildTraeClientHeaders(accessToken: string): Record<string, stri
     'x-device-type': osType,
     'x-os-version': osVersion,
     'x-app-version': appVersion,
-    'User-Agent': `Trae/${appVersion}`,
+    'User-Agent': `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) TRAE/${appVersion} Chrome/130.0.6723.137 Electron/33.2.1 Safari/537.36`,
   }
 }

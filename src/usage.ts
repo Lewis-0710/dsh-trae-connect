@@ -221,10 +221,11 @@ export class TraeUsageClient {
       return { checkedIn: false, credits: 0, enabled: false }
     }
     const headers = await this.clientHeaders()
+    // Trae 官方 Solo 客户端使用 req_source: 2
     const response = await this.fetchImpl('https://api.trae.cn/trae/api/v2/ug/checkin_credits/status', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ req_source: 1 }),
+      body: JSON.stringify({ req_source: 2 }),
       signal: signal ?? AbortSignal.timeout(this.timeoutMs),
     })
     if (!response.ok) {
@@ -232,7 +233,7 @@ export class TraeUsageClient {
     }
     const payload = await response.json() as Record<string, unknown>
     return {
-      checkedIn: payload['checked_in'] === true,
+      checkedIn: payload['checked_in'] === true || payload['did_checked_in'] === true,
       credits: asNumber(payload['credits']) ?? 0,
       enabled: payload['enable'] !== false,
     }
@@ -259,25 +260,71 @@ export class TraeUsageClient {
     } catch {}
 
     const headers = await this.clientHeaders()
-    const response = await this.fetchImpl('https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ req_source: 1 }),
-      signal: signal ?? AbortSignal.timeout(this.timeoutMs),
-    })
 
-    if (!response.ok) {
-      return { ok: false, message: `HTTP ${response.status}` }
+    // 官方 Trae Solo 采用 req_source: 2，亦支持智能回退 req_source: 1
+    const requestSources = [2, 1]
+    let lastResult: { code?: number; message?: string; credits?: number } | undefined
+
+    for (const reqSource of requestSources) {
+      try {
+        const response = await this.fetchImpl('https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ req_source: reqSource }),
+          signal: signal ?? AbortSignal.timeout(this.timeoutMs),
+        })
+
+        if (!response.ok) {
+          lastResult = { message: `HTTP ${response.status}` }
+          continue
+        }
+
+        const json = await response.json() as { code?: number; message?: string; credits?: number }
+        if (json.code === 0) {
+          return { ok: true, credits: json.credits ?? 150 }
+        }
+
+        // 9095: 该设备今日已签到
+        if (json.code === 9095) {
+          return { ok: true, alreadyClaimed: true, credits: json.credits ?? 150 }
+        }
+
+        lastResult = json
+
+        // 如果是 2001 或带有"用户太多"等旧通道排队提示，尝试下一个 reqSource
+        if (reqSource === 2 && (json.code === 2001 || json.message?.includes('参与用户太多'))) {
+          continue
+        }
+        break
+      } catch (err) {
+        lastResult = { message: err instanceof Error ? err.message : String(err) }
+      }
     }
 
-    const json = await response.json() as { code?: number; message?: string; credits?: number }
-    if (json.code === 0) {
-      return { ok: true, credits: json.credits ?? 150 }
+    // 签到完成后再次尝试查询 status 自愈校验（上游可能已经完成赠送并置位）
+    try {
+      const statusAfter = await this.checkinStatus(signal)
+      if (statusAfter.checkedIn) {
+        return { ok: true, alreadyClaimed: true, credits: statusAfter.credits }
+      }
+    } catch {}
+
+    // 错误码语义化映射
+    let friendlyMessage = lastResult?.message
+    if (lastResult?.code === 1002) {
+      friendlyMessage = '无法验证您的 Trae 账号，请在设置中刷新或重新登录后再试'
+    } else if (lastResult?.code === 9090) {
+      friendlyMessage = '当前活动暂不可用或已结束'
+    } else if (lastResult?.code === 9095) {
+      friendlyMessage = '该设备或账号今日已完成签到'
+    } else if (lastResult?.code === 2001 && friendlyMessage?.includes('用户太多')) {
+      friendlyMessage = '当前参与签到用户较多，请稍后点击立即签到或等待自动重试'
     }
+
     return {
       ok: false,
-      ...typeof json.code === 'number' ? { code: json.code } : {},
-      message: json.message ?? (typeof json.code === 'number' ? `签到失败 (错误码 ${json.code})` : '签到未成功'),
+      ...typeof lastResult?.code === 'number' ? { code: lastResult.code } : {},
+      message: friendlyMessage ?? (typeof lastResult?.code === 'number' ? `签到未成功 (错误码 ${lastResult.code})` : '签到未成功'),
     }
   }
 

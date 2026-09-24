@@ -87,4 +87,84 @@ describe('Trae Usage Client', () => {
     expect(view.payStatus?.hasPackage).toBe(true)
     expect(view.payStatus?.inTrial).toBe(true)
   })
+
+  it('claims checkin credits successfully with self-healing and code 0', async () => {
+    const mockCred: TraeCredential = {
+      accessToken: 'token-claim-1',
+      userId: 'u3',
+      edition: 'cn',
+      source: 'desktop',
+      expiresAtMs: 0,
+      host: 'https://api.trae.cn',
+    }
+
+    let claimReqBody: unknown
+    const mockFetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const urlStr = String(url)
+      if (urlStr.includes('/checkin_credits/status')) {
+        return new Response(JSON.stringify({
+          checked_in: false,
+          credits: 150,
+          enable: true,
+        }))
+      }
+      if (urlStr.includes('/checkin_credits/claim')) {
+        claimReqBody = init?.body ? JSON.parse(String(init.body)) : undefined
+        return new Response(JSON.stringify({
+          code: 0,
+          message: 'success',
+          credits: 150,
+        }))
+      }
+      return new Response(JSON.stringify({}), { status: 404 })
+    }
+
+    const client = new TraeUsageClient({
+      credential: async () => mockCred,
+      fetchImpl: mockFetch as typeof fetch,
+    })
+
+    const res = await client.claimCheckin()
+    expect(res.ok).toBe(true)
+    expect(res.credits).toBe(150)
+    expect(claimReqBody).toEqual({ req_source: 2 })
+  })
+
+  it('treats error 9095 (already checked in on this device) as successful claim', async () => {
+    const mockCred: TraeCredential = {
+      accessToken: 'token-claim-2',
+      userId: 'u4',
+      edition: 'cn',
+      source: 'desktop',
+      expiresAtMs: 0,
+      host: 'https://api.trae.cn',
+    }
+
+    const mockFetch = async (url: string | URL | Request): Promise<Response> => {
+      const urlStr = String(url)
+      if (urlStr.includes('/checkin_credits/status')) {
+        return new Response(JSON.stringify({
+          checked_in: false,
+          credits: 150,
+          enable: true,
+        }))
+      }
+      if (urlStr.includes('/checkin_credits/claim')) {
+        return new Response(JSON.stringify({
+          code: 9095,
+          message: 'This device has already checked in today.',
+        }))
+      }
+      return new Response(JSON.stringify({}), { status: 404 })
+    }
+
+    const client = new TraeUsageClient({
+      credential: async () => mockCred,
+      fetchImpl: mockFetch as typeof fetch,
+    })
+
+    const res = await client.claimCheckin()
+    expect(res.ok).toBe(true)
+    expect(res.alreadyClaimed).toBe(true)
+  })
 })
