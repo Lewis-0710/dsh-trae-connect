@@ -56,7 +56,20 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const name = 'dsh-trae-connect-client'
 
 /** 插件配置贡献所依赖的客户端服务清单 */
-export const inject = ['slots', 'locale', 'remote', 'remote.session', 'settingsScope']
+export const inject = ['slots', 'locale', 'remote', 'remote.session']
+
+function resolveService<T = unknown>(ctx: ClientContext, name: string): T | undefined {
+  try {
+    if (typeof (ctx as unknown as { get?: (name: string) => unknown }).get === 'function') {
+      const svc = (ctx as unknown as { get: (name: string) => unknown }).get(name)
+      if (svc !== undefined) return svc as T
+    }
+  } catch {}
+  try {
+    return (ctx as unknown as Record<string, unknown>)[name] as T
+  } catch {}
+  return undefined
+}
 
 /** 各版本卡片所对应的后端状态端点路径映射 */
 const VARIANT_STATUS: Record<string, string> = {
@@ -80,17 +93,25 @@ export function apply(ctx: ClientContext): void {
     // 同步侧边栏额度展示开关与轮询刷新间隔
     let quotaScope: SettingsScope<QuotaSection> | undefined
     try {
-      const scope = (ctx as unknown as {
-        settingsScope: { bind: (options: { namespace: string }) => SettingsScope<QuotaSection> }
-      }).settingsScope.bind({ namespace: 'trae-quota' })
+      const configForms = resolveService<{ get<T>(namespace: string): SettingsScope<T> }>(ctx, 'configForms')
+      const settingsScope = resolveService<{ bind<T>(options: { namespace: string }): SettingsScope<T> }>(ctx, 'settingsScope')
+      const scope = (
+        configForms && typeof configForms.get === 'function'
+          ? configForms.get<QuotaSection>('trae-quota')
+          : settingsScope && typeof settingsScope.bind === 'function'
+            ? settingsScope.bind<QuotaSection>({ namespace: 'trae-quota' })
+            : undefined
+      )
       quotaScope = scope
-      const applySnapshot = (): void => {
-        const value = scope.getSnapshot().value
-        setQuotaToggles(value?.sidebarQuotaCN === true, value?.sidebarQuotaAI === true)
-        if (typeof value?.quotaPollMs === 'number') setQuotaPollMs(value.quotaPollMs)
+      if (scope) {
+        const applySnapshot = (): void => {
+          const value = scope.getSnapshot().value
+          setQuotaToggles(value?.sidebarQuotaCN === true, value?.sidebarQuotaAI === true)
+          if (typeof value?.quotaPollMs === 'number') setQuotaPollMs(value.quotaPollMs)
+        }
+        applySnapshot()
+        scope.subscribe(applySnapshot)
       }
-      applySnapshot()
-      scope.subscribe(applySnapshot)
     } catch (error: unknown) {
       console.error('[dsh-trae-connect] 额度设置作用域不可用（侧栏额度卡片将隐藏）:', error)
     }
