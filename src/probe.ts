@@ -26,8 +26,23 @@ export type ProbeOutcome =
   | { validation: 'non-validating'; efforts: readonly []; requests: number }
   | { validation: 'unknown'; efforts: readonly []; requests: number; reason: string }
 
+const INVALID_EFFORT_CODES = new Set([
+  'invalid_reasoning_effort',
+  'model_param_invalid',
+  '11150',
+  '11133',
+  '4001',
+])
+
 function isEffortRejection(attempt: ProbeAttempt): boolean {
-  return attempt.status === 400 || (attempt.errorCode !== undefined && attempt.errorCode.includes('reasoning'))
+  // Direct HTTP 400 with a recognized error code
+  if (attempt.status === 400 && attempt.errorCode !== undefined && INVALID_EFFORT_CODES.has(attempt.errorCode)) return true
+  // Any HTTP 400 where the detail mentions reasoning/effort
+  if (attempt.status === 400 && attempt.detail !== undefined
+    && (attempt.detail.includes('reasoning') || attempt.detail.includes('effort'))) return true
+  // Trae Solo may return other status codes with recognized error codes
+  if (attempt.errorCode !== undefined && INVALID_EFFORT_CODES.has(attempt.errorCode)) return true
+  return false
 }
 
 function isAcceptance(attempt: ProbeAttempt): boolean {

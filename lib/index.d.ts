@@ -531,6 +531,18 @@ declare class TraeUpstreamClient {
   readonly soloClient: TraeSoloUpstreamClient;
   constructor(options: TraeUpstreamClientOptions);
   chatStream(bodyJson: string, signal?: AbortSignal): Promise<TraeChatResult>;
+  /**
+   * Send a raw probe request that bypasses `prepareSoloBody`.
+   *
+   * The reasoning-effort probe needs sentinel and candidate values to reach
+   * the upstream **unmodified** so it can observe whether the upstream validates
+   * the `reasoning_effort` field. `prepareSoloBody` silently drops values it
+   * cannot map, defeating the sentinel step entirely.
+   *
+   * This method builds the Solo protocol body by hand, inserting `reasoning_effort`
+   * verbatim, and returns the same `TraeChatResult` shape as `chatStream`.
+   */
+  probeEffort(rawBody: string, signal?: AbortSignal): Promise<TraeChatResult>;
   fetchCatalog(signal?: AbortSignal): Promise<readonly TraeModelInfo[]>;
   fetchCredits(signal?: AbortSignal): Promise<TraeWebCredits | undefined>;
 }

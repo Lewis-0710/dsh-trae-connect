@@ -48,4 +48,17 @@ describe('Trae Device Identity & Crypto', () => {
     expect(typeof proof.signature).toBe('string')
     expect(proof.signature.length).toBeGreaterThan(20)
   })
+
+  it('getTraeLocalDeviceId returns valid deviceId and buildTraeClientHeaders builds expected headers', () => {
+    const { getTraeLocalDeviceId, buildTraeClientHeaders } = require('../src/device.ts')
+    const deviceId = getTraeLocalDeviceId()
+    expect(typeof deviceId).toBe('string')
+    expect(deviceId.length).toBeGreaterThan(0)
+
+    const headers = buildTraeClientHeaders('mock-access-token')
+    expect(headers['Authorization']).toBe('Cloud-IDE-JWT mock-access-token')
+    expect(headers['x-device-id']).toBe(deviceId)
+    expect(headers['User-Agent']).toContain('TRAE/')
+    expect(headers['Content-Type']).toBe('application/json')
+  })
 })

@@ -291,8 +291,8 @@ export class TraeUsageClient {
 
         lastResult = json
 
-        // 如果是 2001 或带有"用户太多"等旧通道排队提示，尝试下一个 reqSource
-        if (reqSource === 2 && (json.code === 2001 || json.message?.includes('参与用户太多'))) {
+        // 如果是 2001/9074 或带有"用户太多"等通道排队/风控提示，尝试下一个 reqSource
+        if (reqSource === 2 && (json.code === 2001 || json.code === 9074 || json.message?.includes('参与用户太多'))) {
           continue
         }
         break
@@ -317,7 +317,7 @@ export class TraeUsageClient {
       friendlyMessage = '当前活动暂不可用或已结束'
     } else if (lastResult?.code === 9095) {
       friendlyMessage = '该设备或账号今日已完成签到'
-    } else if (lastResult?.code === 2001 && friendlyMessage?.includes('用户太多')) {
+    } else if (lastResult?.code === 9074 || (lastResult?.code === 2001 && friendlyMessage?.includes('用户太多'))) {
       friendlyMessage = '当前参与签到用户较多，请稍后点击立即签到或等待自动重试'
     }
 

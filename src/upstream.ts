@@ -142,6 +142,67 @@ export class TraeUpstreamClient {
     }
   }
 
+  /**
+   * Send a raw probe request that bypasses `prepareSoloBody`.
+   *
+   * The reasoning-effort probe needs sentinel and candidate values to reach
+   * the upstream **unmodified** so it can observe whether the upstream validates
+   * the `reasoning_effort` field. `prepareSoloBody` silently drops values it
+   * cannot map, defeating the sentinel step entirely.
+   *
+   * This method builds the Solo protocol body by hand, inserting `reasoning_effort`
+   * verbatim, and returns the same `TraeChatResult` shape as `chatStream`.
+   */
+  async probeEffort(
+    rawBody: string,
+    signal?: AbortSignal,
+  ): Promise<TraeChatResult> {
+    const [credential, identity] = await Promise.all([this.store.get(), this.identityProvider()])
+    if (credential === undefined || credential.accessToken === '') {
+      return {
+        ok: false,
+        status: 401,
+        kind: 'authentication',
+        message: `未配置或未登录 ${this.variant.displayName} 凭据`,
+      }
+    }
+
+    const defaultBase = this.variant.region === 'ai'
+      ? 'https://coresg-normal.trae.ai'
+      : 'https://trae-api-cn.mchost.guru'
+    const base = this.chatBaseUrl ?? defaultBase
+    const url = traeEndpoint(base, TRAE_SOLO_CHAT_PATH)
+    const headers = buildTraeCnHeaders(credential, identity)
+
+    try {
+      const response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers,
+        body: rawBody,
+        ...signal !== undefined ? { signal } : {},
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '')
+        return {
+          ok: false,
+          status: response.status,
+          kind: classifyUpstreamError(response.status),
+          message: errorText || `HTTP ${response.status}`,
+        }
+      }
+
+      return { ok: true, response }
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        kind: 'server',
+        message: err instanceof Error ? err.message : String(err),
+      }
+    }
+  }
+
   async fetchCatalog(signal?: AbortSignal): Promise<readonly TraeModelInfo[]> {
     try {
       const [remoteModels, wireModels] = await Promise.all([

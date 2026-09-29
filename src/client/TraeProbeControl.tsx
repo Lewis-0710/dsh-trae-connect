@@ -141,7 +141,9 @@ function useLabel(t: TraePluginCardInjected['t']): string {
 
 function resultFor(status: TraeWebStatus, model: string): TraeWebProbeModel | undefined {
   if (status.status !== 'signed-in') return undefined
-  return status.probe?.results.find(result => result.id === model)
+  const found = status.probe?.results.find(result => result.id === model)
+  if (found === undefined || found.validation === 'unknown') return undefined
+  return found
 }
 
 function tooltipText(
@@ -155,7 +157,9 @@ function tooltipText(
     if (result.validation === 'validating' && result.efforts.length > 0) {
       return t('probeTooltipVerified', { levels: result.efforts.join(' / ') })
     }
-    if (result.validation === 'non-validating') return t('probeTooltipNotValidating')
+    if (result.validation === 'non-validating' || (result.validation === 'validating' && result.efforts.length === 0)) {
+      return t('probeTooltipNotValidating')
+    }
     return t('probeTooltipRetry')
   }
   if (state.failed) return t('probeTooltipRetry')

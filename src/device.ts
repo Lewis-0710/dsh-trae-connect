@@ -11,9 +11,9 @@
 
 import { execSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { hostname, release, userInfo } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { traePluginDataDir } from './paths.ts'
 
@@ -249,9 +249,10 @@ export function signDeviceProof(
 }
 
 /**
- * 读取本地安装的 Trae 桌面端真实设备 ID。
+ * 从 Trae 桌面端本地数据中搜索真实的设备 ID。
+ * 返回 undefined 表示未找到任何本地 Trae 安装。
  */
-export function getTraeLocalDeviceId(): string {
+function discoverTraeNativeDeviceId(): string | undefined {
   const home = process.env['HOME'] || ''
   const candidates = [
     join(home, 'Library/Application Support/TRAE SOLO CN/ModularData/ckg_server/local_env.json'),
@@ -272,7 +273,52 @@ export function getTraeLocalDeviceId(): string {
       }
     } catch {}
   }
-  return createDefaultIdentifiers().deviceId || '3493610113527706'
+  return undefined
+}
+
+/**
+ * 读取本地安装的 Trae 桌面端真实设备 ID。
+ *
+ * 采用三级策略确保 device ID 在 Trae 应用被卸载后仍能正确匹配：
+ * 1. 优先从 Trae 本地 local_env.json 读取（并缓存到 DSH device-profile.json）
+ * 2. 从 DSH device-profile.json 中读取之前缓存的 traeDeviceId
+ * 3. 最后回退到 createDefaultIdentifiers() 计算派生 ID
+ */
+export function getTraeLocalDeviceId(): string {
+  const profilePath = join(traePluginDataDir(), DEVICE_PROFILE_FILE)
+
+  // 1. 尝试从 Trae 本地数据发现真实 device ID
+  const nativeId = discoverTraeNativeDeviceId()
+  if (nativeId !== undefined) {
+    // 发现了 Trae 本地 device ID，缓存到 DSH profile 以备 Trae 卸载后使用
+    try {
+      let profile: Record<string, unknown> = {}
+      if (existsSync(profilePath)) {
+        profile = JSON.parse(readFileSync(profilePath, 'utf8')) as Record<string, unknown>
+      }
+      if (profile['traeDeviceId'] !== nativeId) {
+        profile['traeDeviceId'] = nativeId
+        const dir = dirname(profilePath)
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+        writeFileSync(profilePath, JSON.stringify(profile, null, 2), 'utf8')
+      }
+    } catch {}
+    return nativeId
+  }
+
+  // 2. Trae 本地文件不存在（可能已卸载），从 DSH 缓存的 profile 中恢复
+  try {
+    if (existsSync(profilePath)) {
+      const profile = JSON.parse(readFileSync(profilePath, 'utf8')) as Record<string, unknown>
+      const cached = profile['traeDeviceId']
+      if (typeof cached === 'string' && cached.trim() !== '') {
+        return cached.trim()
+      }
+    }
+  } catch {}
+
+  // 3. 完全没有任何缓存，使用 createDefaultIdentifiers 兜底
+  return createDefaultIdentifiers().deviceId
 }
 
 /**
