@@ -616,8 +616,22 @@ interface CheckInRecord {
   amount?: number;
   message?: string;
   logs?: CheckInLogItem[];
+  nextRunAt?: number;
 }
 declare function getUtc8DateString(now?: Date): string;
+/** 默认自动签到时刻：600 = 10:00 (UTC+8) */
+declare const DEFAULT_CHECK_IN_MINUTE = 600;
+/** 校验并规整签到分钟数（0 ~ 1439） */
+declare function normalizeCheckInMinute(value: unknown): number;
+/**
+ * 计算距离下一次签到时刻的毫秒差（基于 UTC+8）。
+ * 延后 5 秒执行以避免跨天边界抖动。
+ */
+declare function msUntilNextCheckIn(minuteOfDay: number, nowMs?: number): number;
+/**
+ * 判断今天设定的签到时刻（UTC+8）是否已经过去。
+ */
+declare function isPastCheckInTime(minuteOfDay: number, nowMs?: number): boolean;
 declare class JsonFileCheckInStore {
   private readonly filePath;
   constructor(filePath?: string);
@@ -626,28 +640,49 @@ declare class JsonFileCheckInStore {
   write(variantId: string, record: CheckInRecord): void;
   clear(variantId: string): void;
 }
+interface VariantCheckInTarget {
+  variantId: string;
+  client: TraeUpstreamClient;
+  minuteOfDay: () => number;
+  isEnabled: () => boolean;
+  onClaimed?: () => void;
+}
 declare class CheckInScheduler {
-  private timer;
   private readonly store;
-  private readonly clients;
-  constructor(clients: readonly {
-    variantId: string;
-    client: TraeUpstreamClient;
-  }[], store?: JsonFileCheckInStore);
+  private readonly targets;
+  private readonly timers;
+  private readonly nextRuns;
+  private readonly inFlight;
+  private disposed;
+  constructor(targets: readonly VariantCheckInTarget[], store?: JsonFileCheckInStore);
   start(): void;
   stop(): void;
+  rearm(): void;
+  nextRunAt(variantId: string): number | undefined;
   get(variantId: string): CheckInRecord | undefined;
   clearLogs(variantId: string): void;
   /**
-   * 主动同步指定版本的最新服务端签到状态并纠偏本地记录。
+   * 启动或配置变更时的补偿检查：
+   * 只有在【今天设定的签到时刻已过】且【今日尚未签到】时才执行补签，绝不在设定时刻前抢跑。
+   */
+  catchUp(): Promise<void>;
+  /**
+   * 到达设定时刻时的定时执行
+   */
+  private scheduledSweep;
+  private executeCheckIn;
+  /**
+   * 主动同步指定版本的最新服务端签到状态并纠偏本地记录（供前端刷新调用）。
    */
   syncVariant(variantId: string): Promise<CheckInRecord | undefined>;
+  /**
+   * 手动立即签到接口（供前端点击按钮调用）
+   */
   checkIn(variantId: string): Promise<{
     state: string;
     reason?: string;
     amount?: number;
   }>;
-  runAll(): Promise<void>;
 }
 //#endregion
 //#region src/host-heartbeat.d.ts
@@ -872,6 +907,8 @@ interface Config {
   sidebarQuotaAI?: boolean;
   autoCheckInCN?: boolean;
   autoCheckInAI?: boolean;
+  checkInMinuteCN?: number;
+  checkInMinuteAI?: number;
   quotaPollMs?: number;
 }
 declare const QUOTA_POLL_DEFAULT_MS = 300000;
@@ -879,4 +916,4 @@ declare const QUOTA_POLL_MIN_MS = 60000;
 declare const Config: z<Config>;
 declare function apply(ctx: Context, config?: Config): void;
 //#endregion
-export { AI_VARIANT, CN_VARIANT, CheckInScheduler, Config, FALLBACK_TRAE_MODELS, FALLBACK_TRAE_MODELS_AI, JsonFileCheckInStore, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, TRAE_AI_LOGIN_PATH, TRAE_AI_PROBE_PATH, TRAE_AI_PROVIDER, TRAE_AI_SETTINGS_NS, TRAE_AI_STATUS_PATH, TRAE_CATALOG_FILENAME, TRAE_CONNECT_VERSION, TRAE_LOGIN_PATH, TRAE_PROBE_FILENAME, TRAE_PROBE_PATH, TRAE_PROVIDER, TRAE_QUOTA_SETTINGS_NS, TRAE_SETTINGS_NS, TRAE_STATUS_PATH, TRAE_VARIANTS, type TraeAdapter, type TraeAuthStatus, TraeCatalog, TraeCatalogStore, type TraeChatResult, type TraeCredential, type TraeCredentialSource, TraeCredentialStore, type TraeEdition, type TraeHostHeartbeat, TraeLoginClient, type TraeModelInfo, type TraeProbeAction, type TraeProbeRecord, TraeProbeService, type TraeProbeStatus, TraeProbeStore, type TraeProbeValidation, type TraeRegion, type TraeShim, type TraeStorageCandidate, TraeUpstreamClient, type TraeVariant, type TraeWebCatalog, type TraeWebCreditAccount, type TraeWebCredits, type TraeWebLoginAction, type TraeWebLoginRequest, type TraeWebLoginResult, type TraeWebModelBadge, type TraeWebProbeModel, type TraeWebProbeSection, type TraeWebStatus, type UpstreamErrorKind, apply, classifyUpstreamError, clearHostHeartbeat, createLoginKey, createProbeKey, createTraeAdapter, createTraeShim, fallbackModelsFor, fingerprintModel, formatTraeModelDisplayName, getUtc8DateString, inject, isHeartbeatProcessAlive, mergeTraeModelSources, name, newestFirst, parseTraeAuth, parseTraeDocument, probeModel, readHostHeartbeat, refreshTraeCredential, traeHostHeartbeatPath, traeLoginHandler, traePluginDataDir, traeProbeHandler, traeStateDir, traeStatusHandler, traeStorageCandidates, variantFor, variantForRegion, writeHostHeartbeat };
+export { AI_VARIANT, CN_VARIANT, CheckInScheduler, Config, DEFAULT_CHECK_IN_MINUTE, FALLBACK_TRAE_MODELS, FALLBACK_TRAE_MODELS_AI, JsonFileCheckInStore, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, QUOTA_POLL_DEFAULT_MS, QUOTA_POLL_MIN_MS, TRAE_AI_LOGIN_PATH, TRAE_AI_PROBE_PATH, TRAE_AI_PROVIDER, TRAE_AI_SETTINGS_NS, TRAE_AI_STATUS_PATH, TRAE_CATALOG_FILENAME, TRAE_CONNECT_VERSION, TRAE_LOGIN_PATH, TRAE_PROBE_FILENAME, TRAE_PROBE_PATH, TRAE_PROVIDER, TRAE_QUOTA_SETTINGS_NS, TRAE_SETTINGS_NS, TRAE_STATUS_PATH, TRAE_VARIANTS, type TraeAdapter, type TraeAuthStatus, TraeCatalog, TraeCatalogStore, type TraeChatResult, type TraeCredential, type TraeCredentialSource, TraeCredentialStore, type TraeEdition, type TraeHostHeartbeat, TraeLoginClient, type TraeModelInfo, type TraeProbeAction, type TraeProbeRecord, TraeProbeService, type TraeProbeStatus, TraeProbeStore, type TraeProbeValidation, type TraeRegion, type TraeShim, type TraeStorageCandidate, TraeUpstreamClient, type TraeVariant, type TraeWebCatalog, type TraeWebCreditAccount, type TraeWebCredits, type TraeWebLoginAction, type TraeWebLoginRequest, type TraeWebLoginResult, type TraeWebModelBadge, type TraeWebProbeModel, type TraeWebProbeSection, type TraeWebStatus, type UpstreamErrorKind, type VariantCheckInTarget, apply, classifyUpstreamError, clearHostHeartbeat, createLoginKey, createProbeKey, createTraeAdapter, createTraeShim, fallbackModelsFor, fingerprintModel, formatTraeModelDisplayName, getUtc8DateString, inject, isHeartbeatProcessAlive, isPastCheckInTime, mergeTraeModelSources, msUntilNextCheckIn, name, newestFirst, normalizeCheckInMinute, parseTraeAuth, parseTraeDocument, probeModel, readHostHeartbeat, refreshTraeCredential, traeHostHeartbeatPath, traeLoginHandler, traePluginDataDir, traeProbeHandler, traeStateDir, traeStatusHandler, traeStorageCandidates, variantFor, variantForRegion, writeHostHeartbeat };

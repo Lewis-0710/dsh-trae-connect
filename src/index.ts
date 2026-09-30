@@ -38,8 +38,10 @@ import {
 } from './catalog-store.ts'
 import {
   CheckInScheduler,
+  DEFAULT_CHECK_IN_MINUTE,
   getUtc8DateString,
   JsonFileCheckInStore,
+  normalizeCheckInMinute,
 } from './checkin-scheduler.ts'
 import {
   clearHostHeartbeat,
@@ -157,8 +159,13 @@ export {
 } from './catalog-store.ts'
 export {
   CheckInScheduler,
+  DEFAULT_CHECK_IN_MINUTE,
   getUtc8DateString,
+  isPastCheckInTime,
   JsonFileCheckInStore,
+  msUntilNextCheckIn,
+  normalizeCheckInMinute,
+  type VariantCheckInTarget,
 } from './checkin-scheduler.ts'
 export {
   clearHostHeartbeat,
@@ -261,6 +268,8 @@ export interface Config {
   sidebarQuotaAI?: boolean
   autoCheckInCN?: boolean
   autoCheckInAI?: boolean
+  checkInMinuteCN?: number
+  checkInMinuteAI?: number
   quotaPollMs?: number
 }
 
@@ -272,6 +281,11 @@ const QUOTA_TOGGLE_FIELD = z.boolean().default(false)
   .description('Show this variant\u2019s remaining-credit card in the sidebar footer (off by default)')
 const CHECKIN_TOGGLE_FIELD = z.boolean().default(false)
   .description('Automatically check in daily (off by default)')
+const CHECK_IN_MINUTE_FIELD = z.number()
+  .default(DEFAULT_CHECK_IN_MINUTE)
+  .min(0)
+  .max(1439)
+  .description('每日自动签到的时刻（自 UTC+8 午夜起的分钟数，600 = 10:00）')
 export const QUOTA_POLL_DEFAULT_MS = 300_000
 export const QUOTA_POLL_MIN_MS = 60_000
 const QUOTA_POLL_FIELD = z.number()
@@ -286,6 +300,8 @@ export const Config: z<Config> = z.object({
   sidebarQuotaAI: QUOTA_TOGGLE_FIELD,
   autoCheckInCN: CHECKIN_TOGGLE_FIELD,
   autoCheckInAI: CHECKIN_TOGGLE_FIELD,
+  checkInMinuteCN: CHECK_IN_MINUTE_FIELD,
+  checkInMinuteAI: CHECK_IN_MINUTE_FIELD,
   quotaPollMs: QUOTA_POLL_FIELD,
 })
 
@@ -303,6 +319,8 @@ const QUOTA_SECTION: z<Config> = z.object({
   sidebarQuotaAI: QUOTA_TOGGLE_FIELD,
   autoCheckInCN: CHECKIN_TOGGLE_FIELD,
   autoCheckInAI: CHECKIN_TOGGLE_FIELD,
+  checkInMinuteCN: CHECK_IN_MINUTE_FIELD,
+  checkInMinuteAI: CHECK_IN_MINUTE_FIELD,
   quotaPollMs: QUOTA_POLL_FIELD,
 })
 
@@ -337,6 +355,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     ...sources.quota().sidebarQuotaAI === undefined ? {} : { sidebarQuotaAI: sources.quota().sidebarQuotaAI },
     ...sources.quota().autoCheckInCN === undefined ? {} : { autoCheckInCN: sources.quota().autoCheckInCN },
     ...sources.quota().autoCheckInAI === undefined ? {} : { autoCheckInAI: sources.quota().autoCheckInAI },
+    ...sources.quota().checkInMinuteCN === undefined ? {} : { checkInMinuteCN: sources.quota().checkInMinuteCN },
+    ...sources.quota().checkInMinuteAI === undefined ? {} : { checkInMinuteAI: sources.quota().checkInMinuteAI },
     ...sources.quota().quotaPollMs === undefined ? {} : { quotaPollMs: sources.quota().quotaPollMs },
   })
 
@@ -451,7 +471,21 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // Checkin & Usage Scheduler
   const scheduler = new CheckInScheduler(
-    contexts.map(c => ({ variantId: c.variant.id, client: c.client })),
+    contexts.map(c => ({
+      variantId: c.variant.id,
+      client: c.client,
+      minuteOfDay: () => {
+        const cfg = merged()
+        const stored = c.variant.id === CN_VARIANT.id ? cfg.checkInMinuteCN : cfg.checkInMinuteAI
+        return normalizeCheckInMinute(stored ?? DEFAULT_CHECK_IN_MINUTE)
+      },
+      isEnabled: () => {
+        const cfg = merged()
+        return c.variant.id === CN_VARIANT.id
+          ? cfg.autoCheckInCN === true
+          : cfg.autoCheckInAI === true
+      },
+    })),
   )
   scheduler.start()
 
@@ -493,6 +527,7 @@ export function apply(ctx: Context, config: Config = {}): void {
                   amount: rec.amount,
                   message: rec.message,
                   logs: rec.logs,
+                  ...rec.nextRunAt !== undefined ? { nextRunAt: rec.nextRunAt } : {},
                 }
               },
               disabledModels: () => vCtx.catalog.getDisabledModels(),
@@ -592,7 +627,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     settingsCtx.settings.installSection(ctx, TRAE_QUOTA_SETTINGS_NS, QUOTA_SECTION, config, {
       setSource(source) { sources.quota = source as () => Config },
       onChange: () => {
-        void scheduler.runAll()
+        scheduler.rearm()
+        void scheduler.catchUp()
       },
     })
   })

@@ -25,11 +25,52 @@ export interface CheckInRecord {
   amount?: number
   message?: string
   logs?: CheckInLogItem[]
+  nextRunAt?: number
 }
 
 export function getUtc8DateString(now: Date = new Date()): string {
   const utc8 = new Date(now.getTime() + 8 * 60 * 60 * 1000)
   return utc8.toISOString().slice(0, 10)
+}
+
+/** 默认自动签到时刻：600 = 10:00 (UTC+8) */
+export const DEFAULT_CHECK_IN_MINUTE = 600
+
+/** 校验并规整签到分钟数（0 ~ 1439） */
+export function normalizeCheckInMinute(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_CHECK_IN_MINUTE
+  const whole = Math.trunc(value)
+  if (whole < 0 || whole > 1439) return DEFAULT_CHECK_IN_MINUTE
+  return whole
+}
+
+/**
+ * 计算距离下一次签到时刻的毫秒差（基于 UTC+8）。
+ * 延后 5 秒执行以避免跨天边界抖动。
+ */
+export function msUntilNextCheckIn(minuteOfDay: number, nowMs: number = Date.now()): number {
+  const minute = normalizeCheckInMinute(minuteOfDay)
+  const d = new Date(nowMs)
+  const utc8Time = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  const targetUtc8 = new Date(utc8Time.getTime())
+  targetUtc8.setHours(Math.floor(minute / 60), minute % 60, 5, 0)
+
+  let diff = targetUtc8.getTime() - utc8Time.getTime()
+  if (diff <= 0) {
+    targetUtc8.setDate(targetUtc8.getDate() + 1)
+    diff = targetUtc8.getTime() - utc8Time.getTime()
+  }
+  return diff
+}
+
+/**
+ * 判断今天设定的签到时刻（UTC+8）是否已经过去。
+ */
+export function isPastCheckInTime(minuteOfDay: number, nowMs: number = Date.now()): boolean {
+  const minute = normalizeCheckInMinute(minuteOfDay)
+  const d = new Date(nowMs)
+  const utc8 = new Date(d.getTime() + (d.getTimezoneOffset() + 480) * 60_000)
+  return utc8.getHours() * 60 + utc8.getMinutes() >= minute
 }
 
 export class JsonFileCheckInStore {
@@ -58,15 +99,26 @@ export class JsonFileCheckInStore {
       const all = this.readAll()
       const existing = all[variantId]
       const existingLogs = existing?.logs ?? []
-      const newLog: CheckInLogItem = {
-        id: `${record.lastDate}-${record.lastAt}`,
-        date: record.lastDate,
-        timestamp: record.lastAt,
-        status: record.status,
-        ...record.amount === undefined ? {} : { amount: record.amount },
-        ...record.message === undefined ? {} : { message: record.message },
+
+      // 单日去重：如果今天已有 claimed 或 already-claimed 记录，且当前写入也是 already-claimed，不重复追加日志
+      const hasSettledToday = existingLogs.some(
+        l => l.date === record.lastDate && (l.status === 'claimed' || l.status === 'already-claimed'),
+      )
+      const isRedundantAlreadyClaimed = record.status === 'already-claimed' && hasSettledToday
+
+      let updatedLogs = existingLogs
+      if (!isRedundantAlreadyClaimed) {
+        const newLog: CheckInLogItem = {
+          id: `${record.lastDate}-${record.lastAt}`,
+          date: record.lastDate,
+          timestamp: record.lastAt,
+          status: record.status,
+          ...record.amount === undefined ? {} : { amount: record.amount },
+          ...record.message === undefined ? {} : { message: record.message },
+        }
+        updatedLogs = [newLog, ...existingLogs.filter(l => l.id !== newLog.id)].slice(0, 30)
       }
-      const updatedLogs = [newLog, ...existingLogs.filter(l => l.id !== newLog.id)].slice(0, 30)
+
       all[variantId] = {
         ...record,
         logs: updatedLogs,
@@ -93,33 +145,82 @@ export class JsonFileCheckInStore {
   }
 }
 
-export class CheckInScheduler {
-  private timer: NodeJS.Timeout | undefined
-  private readonly store: JsonFileCheckInStore
-  private readonly clients: readonly { variantId: string; client: TraeUpstreamClient }[]
+export interface VariantCheckInTarget {
+  variantId: string
+  client: TraeUpstreamClient
+  minuteOfDay: () => number
+  isEnabled: () => boolean
+  onClaimed?: () => void
+}
 
-  constructor(clients: readonly { variantId: string; client: TraeUpstreamClient }[], store?: JsonFileCheckInStore) {
-    this.clients = clients
+export class CheckInScheduler {
+  private readonly store: JsonFileCheckInStore
+  private readonly targets: readonly VariantCheckInTarget[]
+  private readonly timers = new Map<string, NodeJS.Timeout>()
+  private readonly nextRuns = new Map<string, number>()
+  private readonly inFlight = new Set<string>()
+  private disposed = false
+
+  constructor(targets: readonly VariantCheckInTarget[], store?: JsonFileCheckInStore) {
+    this.targets = targets
     this.store = store ?? new JsonFileCheckInStore()
   }
 
   start(): void {
-    this.stop()
-    // 启动 1 秒后首次检查并自愈签到状态
-    setTimeout(() => { void this.runAll() }, 1_000)
-    // 之后每 2 小时定时轮询检查
-    this.timer = setInterval(() => { void this.runAll() }, 2 * 60 * 60 * 1000)
+    if (this.disposed) return
+    this.rearm()
+    // 启动 1 秒后执行一次 catch-up 补偿检查（只有今天已过设定时刻且未签到才补签）
+    setTimeout(() => { void this.catchUp() }, 1_000)
   }
 
   stop(): void {
-    if (this.timer !== undefined) {
-      clearInterval(this.timer)
-      this.timer = undefined
+    this.disposed = true
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer)
+    }
+    this.timers.clear()
+    this.nextRuns.clear()
+  }
+
+  rearm(): void {
+    if (this.disposed) return
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer)
+    }
+    this.timers.clear()
+    this.nextRuns.clear()
+
+    const nowMs = Date.now()
+    for (const target of this.targets) {
+      if (target.client.variant.region !== 'cn') continue
+      if (!target.isEnabled()) continue
+
+      const delay = msUntilNextCheckIn(target.minuteOfDay(), nowMs)
+      this.nextRuns.set(target.variantId, nowMs + delay)
+
+      const timer = setTimeout(() => {
+        this.timers.delete(target.variantId)
+        void this.scheduledSweep(target.variantId).finally(() => {
+          this.rearm()
+        })
+      }, delay)
+      timer.unref?.()
+      this.timers.set(target.variantId, timer)
     }
   }
 
+  nextRunAt(variantId: string): number | undefined {
+    return this.nextRuns.get(variantId)
+  }
+
   get(variantId: string): CheckInRecord | undefined {
-    return this.store.read(variantId)
+    const rec = this.store.read(variantId)
+    if (!rec) return undefined
+    const next = this.nextRunAt(variantId)
+    return {
+      ...rec,
+      ...next !== undefined ? { nextRunAt: next } : {},
+    }
   }
 
   clearLogs(variantId: string): void {
@@ -127,30 +228,136 @@ export class CheckInScheduler {
   }
 
   /**
-   * 主动同步指定版本的最新服务端签到状态并纠偏本地记录。
+   * 启动或配置变更时的补偿检查：
+   * 只有在【今天设定的签到时刻已过】且【今日尚未签到】时才执行补签，绝不在设定时刻前抢跑。
+   */
+  async catchUp(): Promise<void> {
+    if (this.disposed) return
+    const nowMs = Date.now()
+    const today = getUtc8DateString(new Date(nowMs))
+
+    for (const target of this.targets) {
+      if (target.client.variant.region !== 'cn') continue
+      if (!target.isEnabled()) continue
+      if (this.inFlight.has(target.variantId)) continue
+
+      // 关键：若今天还没到设定的签到时刻，绝对不提前签到
+      if (!isPastCheckInTime(target.minuteOfDay(), nowMs)) continue
+
+      const record = this.store.read(target.variantId)
+      const settledToday = record?.lastDate === today
+        && (record.status === 'claimed' || record.status === 'already-claimed')
+      if (settledToday) continue
+
+      this.inFlight.add(target.variantId)
+      try {
+        await this.executeCheckIn(target, today)
+      } finally {
+        this.inFlight.delete(target.variantId)
+      }
+    }
+  }
+
+  /**
+   * 到达设定时刻时的定时执行
+   */
+  private async scheduledSweep(variantId: string): Promise<void> {
+    if (this.disposed) return
+    const target = this.targets.find(t => t.variantId === variantId)
+    if (!target || !target.isEnabled() || target.client.variant.region !== 'cn') return
+    if (this.inFlight.has(variantId)) return
+
+    this.inFlight.add(variantId)
+    try {
+      const today = getUtc8DateString()
+      await this.executeCheckIn(target, today)
+    } finally {
+      this.inFlight.delete(variantId)
+    }
+  }
+
+  private async executeCheckIn(target: VariantCheckInTarget, today: string): Promise<void> {
+    try {
+      const checkin = await target.client.usageClient.checkinStatus()
+      if (!checkin.enabled) {
+        this.store.write(target.variantId, {
+          lastDate: today,
+          lastAt: Date.now(),
+          status: 'no-campaign',
+          message: '今日无签到活动',
+        })
+        return
+      }
+
+      if (checkin.checkedIn) {
+        this.store.write(target.variantId, {
+          lastDate: today,
+          lastAt: Date.now(),
+          status: 'already-claimed',
+          amount: checkin.credits,
+        })
+        return
+      }
+
+      const claimResult = await target.client.usageClient.claimCheckin()
+      if (claimResult.ok) {
+        const status = claimResult.alreadyClaimed ? 'already-claimed' : 'claimed'
+        const amount = claimResult.credits ?? checkin.credits ?? 150
+        this.store.write(target.variantId, {
+          lastDate: today,
+          lastAt: Date.now(),
+          status,
+          amount,
+        })
+        target.onClaimed?.()
+      } else {
+        this.store.write(target.variantId, {
+          lastDate: today,
+          lastAt: Date.now(),
+          status: 'error',
+          message: claimResult.message ?? '自动签到未成功',
+          amount: checkin.credits,
+        })
+      }
+    } catch (err) {
+      this.store.write(target.variantId, {
+        lastDate: today,
+        lastAt: Date.now(),
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  /**
+   * 主动同步指定版本的最新服务端签到状态并纠偏本地记录（供前端刷新调用）。
    */
   async syncVariant(variantId: string): Promise<CheckInRecord | undefined> {
-    const target = this.clients.find(c => c.variantId === variantId)
+    const target = this.targets.find(c => c.variantId === variantId)
     if (!target || target.client.variant.region !== 'cn') return undefined
     const today = getUtc8DateString()
     try {
       const checkin = await target.client.usageClient.checkinStatus()
       if (checkin.checkedIn) {
+        const existing = this.store.read(variantId)
         const record: CheckInRecord = {
           lastDate: today,
-          lastAt: Date.now(),
+          lastAt: existing?.lastDate === today ? existing.lastAt : Date.now(),
           status: 'already-claimed',
           amount: checkin.credits,
         }
         this.store.write(variantId, record)
-        return record
+        return this.get(variantId)
       }
     } catch {}
-    return this.store.read(variantId)
+    return this.get(variantId)
   }
 
+  /**
+   * 手动立即签到接口（供前端点击按钮调用）
+   */
   async checkIn(variantId: string): Promise<{ state: string; reason?: string; amount?: number }> {
-    const target = this.clients.find(c => c.variantId === variantId)
+    const target = this.targets.find(c => c.variantId === variantId)
     if (!target) return { state: 'error', reason: '未知版本' }
     if (target.client.variant.region !== 'cn') {
       return { state: 'no-campaign', reason: '国际版（Trae Global）暂无每日签到活动' }
@@ -158,7 +365,6 @@ export class CheckInScheduler {
 
     const today = getUtc8DateString()
     try {
-      // 1. 查询当前签到活动与状态
       const checkin = await target.client.usageClient.checkinStatus()
       if (!checkin.enabled) {
         this.store.write(variantId, {
@@ -170,7 +376,6 @@ export class CheckInScheduler {
         return { state: 'no-campaign', reason: '今日无签到活动' }
       }
 
-      // 2. 如果今日已在客户端或其他渠道完成签到，直接纠正为已签到并清除旧错误
       if (checkin.checkedIn) {
         this.store.write(variantId, {
           lastDate: today,
@@ -181,7 +386,6 @@ export class CheckInScheduler {
         return { state: 'already-claimed', amount: checkin.credits }
       }
 
-      // 3. 今日尚未签到，调用官方签到领取接口
       const claimResult = await target.client.usageClient.claimCheckin()
       if (claimResult.ok) {
         const state = claimResult.alreadyClaimed ? 'already-claimed' : 'claimed'
@@ -192,10 +396,10 @@ export class CheckInScheduler {
           status: state,
           amount,
         })
+        target.onClaimed?.()
         return { state, amount }
       }
 
-      // 4. 签到接口返回业务错误（如限流或安全校验）
       const failReason = claimResult.message ?? '签到失败，请稍后在 Trae 桌面端重试'
       this.store.write(variantId, {
         lastDate: today,
@@ -214,66 +418,6 @@ export class CheckInScheduler {
         message,
       })
       return { state: 'error', reason: message }
-    }
-  }
-
-  async runAll(): Promise<void> {
-    const today = getUtc8DateString()
-    for (const { variantId, client } of this.clients) {
-      if (client.variant.region !== 'cn') continue
-      try {
-        const checkin = await client.usageClient.checkinStatus()
-        if (!checkin.enabled) {
-          this.store.write(variantId, {
-            lastDate: today,
-            lastAt: Date.now(),
-            status: 'no-campaign',
-          })
-          continue
-        }
-        if (checkin.checkedIn) {
-          // 只要服务端已签到，立即纠偏为已签到，清除残留的任何错误状态
-          this.store.write(variantId, {
-            lastDate: today,
-            lastAt: Date.now(),
-            status: 'already-claimed',
-            amount: checkin.credits,
-          })
-          continue
-        }
-
-        const last = this.store.read(variantId)
-        if (last?.lastDate === today && (last.status === 'claimed' || last.status === 'already-claimed')) {
-          continue
-        }
-
-        // 执行自动签到
-        const claimResult = await client.usageClient.claimCheckin()
-        if (claimResult.ok) {
-          const status = claimResult.alreadyClaimed ? 'already-claimed' : 'claimed'
-          this.store.write(variantId, {
-            lastDate: today,
-            lastAt: Date.now(),
-            status,
-            amount: claimResult.credits ?? checkin.credits,
-          })
-        } else {
-          this.store.write(variantId, {
-            lastDate: today,
-            lastAt: Date.now(),
-            status: 'error',
-            message: claimResult.message ?? '自动签到未成功',
-            amount: checkin.credits,
-          })
-        }
-      } catch (err) {
-        this.store.write(variantId, {
-          lastDate: today,
-          lastAt: Date.now(),
-          status: 'error',
-          message: err instanceof Error ? err.message : String(err),
-        })
-      }
     }
   }
 }
