@@ -37,6 +37,7 @@ export interface TraePluginCardInjected {
   scope?: SettingsScope<QuotaSection> | undefined
   signedIn?: (() => { cn: boolean; ai: boolean }) | undefined
   unified?: boolean
+  defaultOpen?: boolean
 }
 
 export interface TraeCardVariant {
@@ -72,7 +73,7 @@ export const AI_CARD_VARIANT: TraeCardVariant = {
 export const CARD_VARIANTS: readonly TraeCardVariant[] = [CN_CARD_VARIANT, AI_CARD_VARIANT]
 
 export type TraePluginCardProps =
-  PropsRuntime<'settings.plugin.item'>
+  Partial<PropsRuntime<'settings.plugin.item'>>
   & Partial<TraePluginCardInjected>
 
 const POLL_INTERVAL_MS = 60_000
@@ -873,7 +874,7 @@ function CheckInLogTable({
 }
 
 export function TraePluginCard(props: TraePluginCardProps) {
-  const { t, scope, signedIn, variant, unified } = props
+  const { t, scope, signedIn, variant, unified, defaultOpen } = props
   if (t === undefined) throw new Error('Trae plugin card requires its translation function')
 
   const isUnified = unified === true
@@ -883,7 +884,7 @@ export function TraePluginCard(props: TraePluginCardProps) {
     ? (activeVariantId === 'trae' ? CN_CARD_VARIANT : AI_CARD_VARIANT)
     : (variant ?? CN_CARD_VARIANT)
 
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(defaultOpen ?? false)
   const [hovered, setHovered] = useState(false)
   const [headerFocused, setHeaderFocused] = useState(false)
   const [status, setStatus] = useState<TraeWebStatus>()
