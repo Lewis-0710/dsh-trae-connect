@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Trae Connector",
+    "description": "Connect Trae's model service: dual-region model toggles, context window, quota lookup, and daily check-in."
+  }
+}

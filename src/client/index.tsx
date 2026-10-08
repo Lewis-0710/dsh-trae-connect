@@ -18,6 +18,7 @@ import { TraeProbeControl } from './TraeProbeControl.tsx'
 import { CARD_VARIANTS, TraePluginCard } from './TraePluginCard.tsx'
 import type { TraePluginCardInjected } from './TraePluginCard.tsx'
 import type { QuotaSection } from './QuotaSettingsCard.tsx'
+import { OwnQuotaSettingsScope } from './http-settings-scope.ts'
 import { QuotaDashboard, SidebarQuotaCard } from './SidebarQuotaCard.tsx'
 import type {
   QuotaDashboardInjected,
@@ -92,32 +93,21 @@ export function apply(ctx: ClientContext): void {
 
     // 1. 共享额度设置。在应用启动时即刻绑定 trae-quota 配置作用域，
     // 同步侧边栏额度展示开关与轮询刷新间隔
-    let quotaScope: SettingsScope<QuotaSection> | undefined
-    try {
-      const configForms = resolveService<{ get<T>(namespace: string): SettingsScope<T> }>(ctx, 'configForms')
-      const settingsScope = resolveService<{ bind<T>(options: { namespace: string }): SettingsScope<T> }>(ctx, 'settingsScope')
-      const scope = (
-        configForms && typeof configForms.get === 'function'
-          ? configForms.get<QuotaSection>('trae-quota')
-          : settingsScope && typeof settingsScope.bind === 'function'
-            ? settingsScope.bind<QuotaSection>({ namespace: 'trae-quota' })
-            : undefined
-      )
-      quotaScope = scope
-      if (scope) {
-        const applySnapshot = (): void => {
-          const value = scope.getSnapshot().value
-          setQuotaToggles(value?.sidebarQuotaCN === true, value?.sidebarQuotaAI === true)
-          if (typeof value?.quotaPollMs === 'number') setQuotaPollMs(value.quotaPollMs)
-        }
-        applySnapshot()
-        scope.subscribe(applySnapshot)
-      }
-    } catch (error: unknown) {
-      console.error('[dsh-trae-connect] 额度设置作用域不可用（侧栏额度卡片将隐藏）:', error)
-    }
+    // 1. 独立自有额度与自动签到配置作用域，彻底摆脱宿主环境 settingsScope 移除影响
+    const ownQuotaScope = new OwnQuotaSettingsScope()
+    void ownQuotaScope.load().catch(() => {})
+    const quotaScope: SettingsScope<QuotaSection> = ownQuotaScope as never
 
-    // 2. 侧边栏插件管理面板：在 dsh-trae-connect 插件详情页注册统一配置卡片 (plugins.bundle.config)
+    const applySnapshot = (): void => {
+      const value = ownQuotaScope.getSnapshot().value as QuotaSection | undefined
+      setQuotaToggles(value?.sidebarQuotaCN === true, value?.sidebarQuotaAI === true)
+      if (typeof value?.quotaPollMs === 'number') setQuotaPollMs(value.quotaPollMs)
+    }
+    applySnapshot()
+    ownQuotaScope.subscribe(applySnapshot)
+
+    // 2. 双重注册配置卡片：
+    // A. 侧边栏插件管理面板：在 dsh-trae-connect 插件详情页注册统一配置卡片 (plugins.bundle.config)
     const PACKAGE_NAME = 'dsh-trae-connect'
     const PLUGIN_MANAGER_SLOT = 'plugins.bundle.config'
 
@@ -139,6 +129,22 @@ export function apply(ctx: ClientContext): void {
     } catch (error: unknown) {
       console.error('[dsh-trae-connect] plugin manager page registration failed (host provider unaffected):', error)
     }
+
+    // B. 兼容保留设置面板插槽 (settings.plugin.item)，确保旧版环境也能正常呈现
+    try {
+      ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
+        name: 'settings.plugin.item',
+        key: 'trae',
+        priority: 10,
+        inject: (): TraePluginCardInjected => ({
+          t,
+          scope: quotaScope,
+          signedIn: () => quotaSignInState(),
+          unified: true,
+          defaultOpen: false,
+        }),
+      }, TraePluginCard as never))
+    } catch {}
 
     // 3. 侧栏底部额度卡片与详情看板
     const QUOTA_PANEL_ID = 'trae-quota-panel'

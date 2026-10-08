@@ -88,6 +88,8 @@ import {
   type TraeProbeValidation,
 } from './probe-store.ts'
 import { refreshTraeCredential } from './refresh.ts'
+import { SettingsStore } from './settings-store.ts'
+import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import {
   createTraeShim,
   type TraeShim,
@@ -259,6 +261,7 @@ export const inject = ['llm']
 export const TRAE_SETTINGS_NS = 'trae' as SettingsNamespace
 export const TRAE_AI_SETTINGS_NS = 'trae-global' as SettingsNamespace
 export const TRAE_QUOTA_SETTINGS_NS = 'trae-quota' as SettingsNamespace
+export const TRAE_SETTINGS_FACE_PATH = '/plugins/dsh-trae-connect/settings'
 
 /** Plugin configuration. */
 export interface Config {
@@ -341,6 +344,7 @@ interface VariantContext {
 
 export function apply(ctx: Context, config: Config = {}): void {
   const contexts: VariantContext[] = []
+  const settingsStore = new SettingsStore()
 
   const sources: { cn: () => Config; ai: () => Config; quota: () => Config } = {
     cn: () => config,
@@ -348,17 +352,21 @@ export function apply(ctx: Context, config: Config = {}): void {
     quota: () => config,
   }
 
-  const merged = (): Config => ({
-    ...sources.cn().probeConsent === undefined ? {} : { probeConsent: sources.cn().probeConsent },
-    ...sources.ai().useMaximumContextWindow === undefined ? {} : { useMaximumContextWindow: sources.ai().useMaximumContextWindow },
-    ...sources.quota().sidebarQuotaCN === undefined ? {} : { sidebarQuotaCN: sources.quota().sidebarQuotaCN },
-    ...sources.quota().sidebarQuotaAI === undefined ? {} : { sidebarQuotaAI: sources.quota().sidebarQuotaAI },
-    ...sources.quota().autoCheckInCN === undefined ? {} : { autoCheckInCN: sources.quota().autoCheckInCN },
-    ...sources.quota().autoCheckInAI === undefined ? {} : { autoCheckInAI: sources.quota().autoCheckInAI },
-    ...sources.quota().checkInMinuteCN === undefined ? {} : { checkInMinuteCN: sources.quota().checkInMinuteCN },
-    ...sources.quota().checkInMinuteAI === undefined ? {} : { checkInMinuteAI: sources.quota().checkInMinuteAI },
-    ...sources.quota().quotaPollMs === undefined ? {} : { quotaPollMs: sources.quota().quotaPollMs },
-  })
+  const merged = (): Config => {
+    const user = settingsStore.values() as Config
+    return {
+      ...sources.cn().probeConsent === undefined ? {} : { probeConsent: sources.cn().probeConsent },
+      ...sources.ai().useMaximumContextWindow === undefined ? {} : { useMaximumContextWindow: sources.ai().useMaximumContextWindow },
+      ...sources.quota().sidebarQuotaCN === undefined ? {} : { sidebarQuotaCN: sources.quota().sidebarQuotaCN },
+      ...sources.quota().sidebarQuotaAI === undefined ? {} : { sidebarQuotaAI: sources.quota().sidebarQuotaAI },
+      ...sources.quota().autoCheckInCN === undefined ? {} : { autoCheckInCN: sources.quota().autoCheckInCN },
+      ...sources.quota().autoCheckInAI === undefined ? {} : { autoCheckInAI: sources.quota().autoCheckInAI },
+      ...sources.quota().checkInMinuteCN === undefined ? {} : { checkInMinuteCN: sources.quota().checkInMinuteCN },
+      ...sources.quota().checkInMinuteAI === undefined ? {} : { checkInMinuteAI: sources.quota().checkInMinuteAI },
+      ...sources.quota().quotaPollMs === undefined ? {} : { quotaPollMs: sources.quota().quotaPollMs },
+      ...user,
+    }
+  }
 
   const maximumContextWindowByVariant: Record<string, boolean> = {
     trae: config.useMaximumContextWindow ?? true,
@@ -609,6 +617,63 @@ export function apply(ctx: Context, config: Config = {}): void {
         }
       })
     }
+
+    const settingsKey = createProbeKey()
+    webCtx.effect(() => {
+      const disposeSettingsFace = webCtx.webServer.register({
+        kind: 'exact',
+        path: TRAE_SETTINGS_FACE_PATH,
+        handler: async (req, res) => {
+          const send = (status: number, body: unknown) => {
+            res.writeHead(status, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(body))
+          }
+          if (!hostIsLoopback(req.headers.host) || !originIsLoopback(req.headers.origin)) {
+            send(403, { error: 'request-not-trusted' })
+            return
+          }
+          const view = () => ({
+            key: settingsKey,
+            value: merged(),
+            base: {
+              sidebarQuotaCN: false,
+              sidebarQuotaAI: false,
+              autoCheckInCN: true,
+              checkInMinuteCN: 600,
+              quotaPollMs: 300_000,
+            },
+            user: settingsStore.values(),
+          })
+          if (req.method === 'GET') {
+            send(200, view())
+            return
+          }
+          if (req.method !== 'POST') {
+            send(405, { error: 'method not allowed' })
+            return
+          }
+          const headerKey = (req.headers['x-trae-settings-key'] ?? req.headers['x-dsh-settings-key']) as string | undefined
+          if (headerKey !== undefined && headerKey !== settingsKey) {
+            send(403, { error: 'invalid-key' })
+            return
+          }
+          const chunks: Buffer[] = []
+          for await (const chunk of req) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+          }
+          try {
+            const patch = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, unknown>
+            settingsStore.patch(patch, true)
+            scheduler.rearm()
+            void scheduler.catchUp()
+            send(200, view())
+          } catch {
+            send(400, { error: 'invalid patch' })
+          }
+        },
+      })
+      return () => { disposeSettingsFace() }
+    })
   })
 
   // Heartbeat

@@ -743,6 +743,10 @@ function CheckInLogTable({
   disabled,
   notice,
   nextRun,
+  autoCheckIn,
+  checkInMinute = 600,
+  onToggleAutoCheckIn,
+  onChangeCheckInMinute,
 }: {
   logs?: readonly {
     id: string
@@ -762,7 +766,33 @@ function CheckInLogTable({
   disabled?: boolean
   notice?: string | undefined
   nextRun?: number | undefined
+  autoCheckIn?: boolean | undefined
+  checkInMinute?: number | undefined
+  onToggleAutoCheckIn?: ((enabled: boolean) => void) | undefined
+  onChangeCheckInMinute?: ((minute: number) => void) | undefined
 }): React.ReactNode {
+  const safeMinute = Number.isFinite(checkInMinute) ? (checkInMinute as number) : 600
+  const hours = Math.floor(safeMinute / 60)
+  const mins = safeMinute % 60
+  const [hourDraft, setHourDraft] = useState(String(hours))
+  const [minuteDraft, setMinuteDraft] = useState(String(mins).padStart(2, '0'))
+
+  useEffect(() => {
+    setHourDraft(String(hours))
+    setMinuteDraft(String(mins).padStart(2, '0'))
+  }, [hours, mins])
+
+  const commitTime = () => {
+    const h = Number.parseInt(hourDraft, 10)
+    const m = Number.parseInt(minuteDraft, 10)
+    const nextH = Number.isFinite(h) ? Math.min(23, Math.max(0, h)) : hours
+    const nextM = Number.isFinite(m) ? Math.min(59, Math.max(0, m)) : mins
+    const nextTotal = nextH * 60 + nextM
+    if (nextTotal !== safeMinute) {
+      onChangeCheckInMinute?.(nextTotal)
+    }
+  }
+
   return (
     <div style={quotaListStyle}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -794,6 +824,106 @@ function CheckInLogTable({
           </button>
         </div>
       </div>
+      {onToggleAutoCheckIn !== undefined ? (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          padding: '10px 14px',
+          borderRadius: 10,
+          background: 'var(--dsw-alias-bg-layer-2)',
+          border: '1px solid var(--dsw-alias-border-l2)',
+          marginTop: 2,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+                {t('autoCheckInCN')}
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                {t('autoCheckInHintCN')}
+              </span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoCheckIn === true}
+              disabled={disabled}
+              onClick={() => onToggleAutoCheckIn(!autoCheckIn)}
+              style={{
+                flex: 'none',
+                display: 'flex',
+                width: 36,
+                height: 20,
+                borderRadius: 10,
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'var(--dsw-alias-border-l2)',
+                padding: 1,
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                alignItems: 'center',
+                background: autoCheckIn ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,0.2))',
+                justifyContent: autoCheckIn ? 'flex-end' : 'flex-start',
+                opacity: disabled ? 0.45 : 1,
+                transition: 'background .16s',
+              }}
+            >
+              <span style={{ display: 'block', width: 16, height: 16, borderRadius: '50%', background: 'var(--dsw-alias-bg-layer-1, #fff)', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }} />
+            </button>
+          </div>
+          {autoCheckIn ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.1))', paddingTop: 8 }}>
+              <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>
+                {t('checkInTimeCN')}
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  value={hourDraft}
+                  disabled={disabled}
+                  onChange={e => setHourDraft(e.target.value)}
+                  onBlur={commitTime}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitTime() } }}
+                  style={{
+                    width: 44,
+                    padding: '3px 6px',
+                    borderRadius: 6,
+                    border: '1px solid var(--dsw-alias-border-l2)',
+                    background: 'var(--dsw-alias-bg-layer-1)',
+                    color: 'var(--dsw-alias-label-primary)',
+                    textAlign: 'center',
+                    fontSize: 12,
+                  }}
+                />
+                <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>:</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={minuteDraft}
+                  disabled={disabled}
+                  onChange={e => setMinuteDraft(e.target.value)}
+                  onBlur={commitTime}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitTime() } }}
+                  style={{
+                    width: 44,
+                    padding: '3px 6px',
+                    borderRadius: 6,
+                    border: '1px solid var(--dsw-alias-border-l2)',
+                    background: 'var(--dsw-alias-bg-layer-1)',
+                    color: 'var(--dsw-alias-label-primary)',
+                    textAlign: 'center',
+                    fontSize: 12,
+                  }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>UTC+8</span>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {notice === undefined ? null : (
         <div style={{
           marginTop: 8,
@@ -902,6 +1032,26 @@ export function TraePluginCard(props: TraePluginCardProps) {
   const mounted = useRef(true)
   const readSeq = useRef(0)
   const manualControllers = useRef(new Set<AbortController>())
+
+  const subscribeScope = useCallback((onStoreChange: () => void) => {
+    return scope?.subscribe(onStoreChange) ?? (() => {})
+  }, [scope])
+  const scopeSnapshot = useSyncExternalStore(subscribeScope, () => scope?.getSnapshot())
+  const scopeValues = scopeSnapshot?.value as QuotaSection | undefined
+
+  const isCN = currentVariant.id === 'trae'
+  const currentAutoCheckIn = isCN ? (scopeValues?.autoCheckInCN === true) : (scopeValues?.autoCheckInAI === true)
+  const currentCheckInMinute = isCN ? (scopeValues?.checkInMinuteCN ?? 600) : (scopeValues?.checkInMinuteAI ?? 600)
+
+  const handleToggleAutoCheckIn = useCallback((enabled: boolean) => {
+    const field = isCN ? 'autoCheckInCN' : 'autoCheckInAI'
+    void scope?.set(field, enabled)
+  }, [isCN, scope])
+
+  const handleChangeCheckInMinute = useCallback((minute: number) => {
+    const field = isCN ? 'checkInMinuteCN' : 'checkInMinuteAI'
+    void scope?.set(field, minute)
+  }, [isCN, scope])
 
   useEffect(() => {
     mounted.current = true
@@ -1576,6 +1726,10 @@ export function TraePluginCard(props: TraePluginCardProps) {
                     busy={busy}
                     checkingIn={checkingIn}
                     clearing={clearingLogs}
+                    autoCheckIn={currentAutoCheckIn}
+                    checkInMinute={currentCheckInMinute}
+                    onToggleAutoCheckIn={scope !== undefined ? handleToggleAutoCheckIn : undefined}
+                    onChangeCheckInMinute={scope !== undefined ? handleChangeCheckInMinute : undefined}
                     {...checkInNotice === undefined ? {} : { notice: checkInNotice }}
                     {...status.checkIn?.nextRunAt === undefined ? {} : { nextRun: status.checkIn.nextRunAt }}
                     onCheckIn={() => { void manualCheckIn() }}
